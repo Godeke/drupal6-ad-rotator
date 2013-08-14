@@ -1,0 +1,166 @@
+diff --git ad.admin.inc ad.admin.inc
+index 5623e9a..a05eef9 100644
+--- ad.admin.inc
++++ ad.admin.inc
+@@ -757,6 +757,14 @@ function ad_admin_group_form($form_state, $group = NULL) {
+     '#description' => t('When listing ad groups, those with lighter (smaller) weights get listed before ad groups with heavier (larger) weights.  Ad groups with equal weights are sorted alphabetically.')
+   );
+ 
++  $form['automatic_rotation'] = array(
++    '#type' => 'textfield',
++    '#size' => 3,
++    '#title' => t('Automatic rotation'),
++    '#default_value' => isset($group->automatic_rotation) ? $group->automatic_rotation : 0,
++    '#description' => t('Time in seconds to reload this ad group when displaying it using jQuery. Set this to zero to disable automatic rotation. You must set the Display type to jQuery on the !link for this setting to take effect.', array('!link' => l(t('global settings page'), 'admin/content/ad/configure')))
++  );
++
+   $form['vid'] = array(
+     '#type' => 'hidden',
+     '#value' => _ad_get_vid(),
+@@ -794,6 +802,10 @@ function ad_admin_group_form_validate($form, &$form_state) {
+   if ($form_state['values']['op'] == t('Delete')) {
+     drupal_goto('admin/content/ad/groups/'. $form_state['values']['tid'] .'/delete');
+   }
++  
++  if (!is_numeric($form_state['values']['automatic_rotation'])) {
++    form_set_error('automatic_rotation', t('Automatic rotation should be a number.'));
++  }
+ }
+ 
+ 
+@@ -812,6 +824,12 @@ function ad_admin_group_form_submit($form, &$form_state) {
+     case SAVED_UPDATED:
+       drupal_set_message(t('The ad group %term has been updated.', array('%term' => $form_state['values']['name'])));
+   }
++  
++  // update the automatic rotation value for this group
++  $groups_automatic_rotation = variable_get('ad_groups_automatic_rotation', array());
++  $groups_automatic_rotation[$form_state['values']['tid']] = $form_state['values']['automatic_rotation'];
++  variable_set('ad_groups_automatic_rotation', $groups_automatic_rotation);
++  
+   $form_state['redirect'] = 'admin/content/ad/groups';
+ }
+ 
+@@ -842,6 +860,14 @@ function ad_confirm_group_delete($form_state, $group = NULL) {
+  */
+ function ad_confirm_group_delete_submit($form, &$form_state) {
+   taxonomy_del_term($form_state['values']['tid']);
++  
++  // remove the automatic rotation value for this group
++  $groups_automatic_rotation = variable_get('ad_groups_automatic_rotation', array());
++  if (isset($groups_automatic_rotation[$form_state['values']['tid']])) {
++    unset($groups_automatic_rotation[$form_state['values']['tid']]);
++  }
++  variable_set('ad_groups_automatic_rotation', $groups_automatic_rotation);
++  
+   drupal_set_message(t('The ad group %term has been deleted.', array('%term' => $form_state['values']['name'])));
+   watchdog('ad', 'mailarchive: deleted %term ad group.', array('%term' => $form_state['values']['name']));
+ 
+diff --git ad.install ad.install
+index 649ad0b..a50d8b3 100644
+--- ad.install
++++ ad.install
+@@ -323,7 +323,7 @@ function ad_uninstall() {
+   }
+ 
+   // Delete all remaining ad module variables.
+-  $variables = array('ad_cron_timestamp', 'ad_link_target', 'ad_cache', 'ad_cache_file', 'adserve', 'ad_group_vid', 'ad_groups', 'ad_validate_url', 'ad_display');
++  $variables = array('ad_cron_timestamp', 'ad_link_target', 'ad_cache', 'ad_cache_file', 'adserve', 'ad_group_vid', 'ad_groups', 'ad_validate_url', 'ad_display', 'ad_groups_automatic_rotation');
+   foreach ($variables as $variable) {
+     variable_del($variable);
+   }
+diff --git ad.module ad.module
+index 9692508..2aee1e4 100644
+--- ad.module
++++ ad.module
+@@ -145,6 +145,10 @@ function ad($group = FALSE, $quantity = 1, $options = array()) {
+         $tids = $options['tids'];
+         $query['t'] = $tids;
+         $group = "tids-$tids";
++        $groups_automatic_rotation = variable_get('ad_groups_automatic_rotation', array());
++        if (!empty($groups_automatic_rotation[$tids])) {
++          $interval = $groups_automatic_rotation[$tids] * 1000;
++        }
+       }
+       else {
+         // Choose ads from the specified group.
+@@ -188,7 +192,7 @@ function ad($group = FALSE, $quantity = 1, $options = array()) {
+   }
+ 
+   if (user_access('show advertisements')) {
+-    return theme('ad_display', $group, $output, $options['ad_display']);
++    return theme('ad_display', $group, $output, $options['ad_display'], !empty($interval) ? $interval : 0);
+   }
+   else {
+     return theme('ad_display', 'none', "<!-- Enable 'show advertisements' permission if you wish to display ads here. -->");
+@@ -199,7 +203,7 @@ function ad($group = FALSE, $quantity = 1, $options = array()) {
+  * Function to display the actual advertisement to the screen.  Wrap it in a
+  * theme function to make it possible to customize in your own theme.
+  */
+-function theme_ad_display($group, $display, $method = 'javascript') {
++function theme_ad_display($group, $display, $method = 'javascript', $interval = 0) {
+   static $id = -1;
+ 
+   // Increment counter for displaying multiple advertisements on the page.
+@@ -209,7 +213,37 @@ function theme_ad_display($group, $display, $method = 'javascript') {
+   $group = preg_replace('/[,]/', '+', $group);
+ 
+   if ($method == 'jquery') {
+-    return "\n<div class=\"advertisement group-$group\" id=\"group-id-$id\">\n <script type=\"text/javascript\">\n//<![CDATA[\n  $(document).ready(function(){ jQuery(\"div#group-id-$id\").load(\"$display\"); });\n //]]>\n </script>\n</div>\n";
++    if ($interval) {
++      /**
++       * The code below was run through the closure compiler to produce the
++       * js sent to the browser
++       * http://closure-compiler.appspot.com
++      $(document).ready(function() {
++        jQuery.get('$display', function(data) {
++          var ads = $("div:not('.advertisement-space')", '<div>' + data + '</div>');
++          if (ads.length == 0) return;
++          var current_ad = 0;
++          var show_ad = function() {
++            current_ad = current_ad % ads.length + 1;
++            jQuery("div#group-id-$id").html(ads.get(current_ad - 1));
++          };
++          show_ad();
++          setInterval(show_ad, $interval);
++        });
++      });
++      */
++      return <<<JQINLINE
++<script type="text/javascript">
++//<![CDATA[
++$(document).ready(function(){jQuery.get("$display",function(a){var b=$("div:not('.advertisement-space')","<div>"+a+"</div>");if(b.length!=0){var c=0;a=function(){c=c%b.length+1;jQuery("div#group-id-$id").html(b.get(c-1))};a();setInterval(a,$interval)}})});
++//]]>
++</script>
++<div class="advertisement group-$group" id="group-id-$id"></div>
++JQINLINE;
++    }
++    else {
++      return "\n<div class=\"advertisement group-$group\" id=\"group-id-$id\">\n <script type=\"text/javascript\">\n//<![CDATA[\n  $(document).ready(function(){ jQuery(\"div#group-id-$id\").load(\"$display\"); });\n //]]>\n </script>\n</div>\n";
++    }
+   }
+   else if ($method == 'raw') {
+     return $display;
+@@ -1389,12 +1423,14 @@ function ad_groups_list($object = FALSE, $tid = NULL) {
+   if ($object) {
+     if (empty($groups)) {
+       $tids = taxonomy_get_tree(_ad_get_vid());
++      $groups_automatic_rotation = variable_get('ad_groups_automatic_rotation', array());
+       if (is_array($tids)) {
+         foreach ($tids as $group) {
+           $groups[$group->tid]->name = $group->name;
+           $groups[$group->tid]->description = $group->description;
+           $groups[$group->tid]->tid = $group->tid;
+           $groups[$group->tid]->weight = $group->weight;
++          $groups[$group->tid]->automatic_rotation = empty($groups_automatic_rotation[$group->tid]) ? 0 : $groups_automatic_rotation[$group->tid];
+         }
+       }
+       // Hard coded "default" group with tid of 0.
+@@ -1402,6 +1438,7 @@ function ad_groups_list($object = FALSE, $tid = NULL) {
+       $groups[0]->description = t('The default ad group is comprised of all ads not assigned to any other ad group.');
+       $groups[0]->tid = 0;
+       $groups[0]->weight = 0;
++      $groups[0]->automatic_rotation = 0;
+     }
+     // Return a specific group object.
+     if ((int)$tid) {
