@@ -202,14 +202,12 @@ function ad($group = FALSE, $quantity = 1, $options = array()) {
  * Function to display the actual advertisement to the screen.  Wrap it in a
  * theme function to make it possible to customize in your own theme.
  */
-function theme_ad_display($group, $display, $method = 'javascript', $interval = 30) {
+function theme_ad_display($group, $display, $method = 'javascript', $interval = 0) {
   static $id = -1;
 
   // Increment counter for displaying multiple advertisements on the page.
   $id++;
   
-  $interval = 6000;
-
   // The naming convention for the id attribute doesn't allow commas.
   $group = preg_replace('/[,]/', '+', $group);
 
